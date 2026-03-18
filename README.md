@@ -23,7 +23,8 @@ Presidio is an open-source framework for **PII detection and anonymization**.
 ### A) Standard Presidio pipeline (detect → anonymize)
 
 ```mermaid
-flowchart LR A["Raw text"] --> B["Presidio Analyzer (analyze)"] --> C["RecognizerResults (entity_type, start/end, score)"] --> D["Presidio Anonymizer (anonymize)"] --> E["Anonymized text"]
+flowchart LR
+A["Raw text"] --> B["Presidio Analyzer (analyze)"] --> C["RecognizerResults (entity_type, start/end, score)"] --> D["Presidio Anonymizer (anonymize)"] --> E["Anonymized text"]
 ```
 
 ### B) LLM-safe pipeline (detect → encrypt → LLM → decrypt)
