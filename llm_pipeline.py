@@ -6,6 +6,48 @@ from presidio_analyzer import AnalyzerEngine
 from presidio_anonymizer import AnonymizerEngine, DeanonymizeEngine
 from presidio_anonymizer.entities import OperatorConfig
 
+# Keep the LLM wrapper focused on high-signal PII types.
+# This avoids encrypting benign entities (e.g., LOCATION) and reduces overlaps (e.g., URL inside EMAIL).
+PII_ENTITY_ALLOWLIST = {
+    "PERSON",
+    "EMAIL_ADDRESS",
+    "PHONE_NUMBER",
+    "CREDIT_CARD",
+    "IBAN_CODE",
+    "US_SSN",
+    "US_BANK_NUMBER",
+    "US_DRIVER_LICENSE",
+    "UK_NHS",
+    "AADHAAR_NUMBER",
+}
+
+SCORE_THRESHOLD = 0.3
+
+
+def _resolve_overlaps(results):
+    """
+    Presidio may return overlapping entities (e.g., URL spans inside an EMAIL span).
+    For reversible transforms (encrypt/decrypt), we must avoid overlaps to keep mappings consistent.
+    """
+
+    if not results:
+        return results
+
+    # Prefer higher score, then longer span, then earlier start.
+    ordered = sorted(results, key=lambda r: (-r.score, -(r.end - r.start), r.start))
+    kept = []
+
+    def overlaps(a, b) -> bool:
+        return not (a.end <= b.start or b.end <= a.start)
+
+    for r in ordered:
+        if any(overlaps(r, k) for k in kept):
+            continue
+        kept.append(r)
+
+    return sorted(kept, key=lambda r: (r.start, r.end))
+
+
 # ---------------------------------------------------------------------------
 # Load environment variables from .env
 # ---------------------------------------------------------------------------
@@ -68,7 +110,15 @@ def safe_llm_call(user_text: str) -> str:
     """
 
     # --- Step 1: detect ---
-    results = analyzer.analyze(text=user_text, language="en")
+    results = analyzer.analyze(
+        text=user_text,
+        language="en",
+        score_threshold=SCORE_THRESHOLD,
+    )
+
+    # Keep only the entities we actually want to protect in this demo.
+    results = [r for r in results if r.entity_type in PII_ENTITY_ALLOWLIST]
+    results = _resolve_overlaps(results)
 
     if not results:
         # No PII found — call LLM directly, nothing to encrypt/decrypt
