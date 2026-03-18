@@ -1,3 +1,4 @@
+import copy
 import os
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -46,43 +47,62 @@ def _resolve_overlaps(results):
 def _normalize_b64_token(token: str) -> str:
     """
     Presidio's encrypt operator returns a base64-ish token. In some environments/models,
-    decrypt may fail with 'Incorrect padding' if the token is missing '=' padding or uses
-    URL-safe characters ('-' and '_'). Normalizing makes deanonymization robust.
+    decrypt may fail with 'Incorrect padding' if the token is missing '=' padding.
+    Adding padding (without changing the alphabet) makes deanonymization more robust.
     """
 
-    # Convert URL-safe base64 alphabet to standard base64.
-    normalized = token.replace("-", "+").replace("_", "/")
-
     # Add '=' padding if needed (length must be a multiple of 4 for standard base64).
+    normalized = token
     pad = (-len(normalized)) % 4
     if pad:
         normalized += "=" * pad
     return normalized
 
 
-def _normalize_anonymized_result(anon):
+def _manual_deanonymize(llm_text: str, anon_items, key: str) -> str:
     """
-    Return (normalized_text, normalized_items) where each item.text is normalized to match
-    what the decrypt operator can reliably parse.
+    Fallback path when DeanonymizeEngine fails on the full LLM response.
+
+    Strategy:
+    - Decrypt each encrypted token in isolation (more reliable than scanning a full response)
+    - Then replace exact occurrences of that token in the response.
     """
 
-    normalized_text = anon.text
-    normalized_items = []
+    out = llm_text
 
-    for item in anon.items:
-        old = item.text
-        new = _normalize_b64_token(old)
-        if new != old:
-            normalized_text = normalized_text.replace(old, new)
-            # Create a shallow copy-like object by mutating a reference-safe field.
-            # DeanonymizeEngine primarily uses item.text as the lookup key.
-            try:
-                item.text = new
-            except Exception:
-                pass
-        normalized_items.append(item)
+    for item in anon_items:
+        encrypted = getattr(item, "text", None)
+        if not encrypted:
+            continue
 
-    return normalized_text, normalized_items
+        # Use a copy so we can safely tweak text/start/end.
+        item_copy = copy.copy(item)
+
+        # Some decrypt implementations are strict about padding.
+        padded = _normalize_b64_token(encrypted)
+        item_copy.text = padded
+
+        # Make the entity coordinates consistent with the per-token text.
+        if hasattr(item_copy, "start"):
+            item_copy.start = 0
+        if hasattr(item_copy, "end"):
+            item_copy.end = len(padded)
+
+        try:
+            restored = deanonymizer.deanonymize(
+                text=padded,
+                entities=[item_copy],
+                operators={"DEFAULT": OperatorConfig("decrypt", {"key": key})},
+            ).text
+        except Exception:
+            # If we can't decrypt this token, skip it (returning partially restored output
+            # is better than crashing).
+            continue
+
+        # Replace both padded and unpadded forms if present.
+        out = out.replace(encrypted, restored).replace(padded, restored)
+
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -174,28 +194,25 @@ def safe_llm_call(user_text: str) -> str:
             "DEFAULT": OperatorConfig("encrypt", {"key": ENCRYPT_KEY})
         },
     )
-    anon_text_for_llm, anon_items_for_decrypt = _normalize_anonymized_result(anon)
-    print(f"[presidio] Anonymized text sent to LLM:\n          {anon_text_for_llm}\n")
+    print(f"[presidio] Anonymized text sent to LLM:\n          {anon.text}\n")
 
     # --- Step 3: call LLM ---
-    llm_response = call_openai(anon_text_for_llm)
+    llm_response = call_openai(anon.text)
     print(f"[presidio] Raw LLM response:\n          {llm_response}\n")
 
     # --- Step 4: decrypt ---
     try:
         deanon = deanonymizer.deanonymize(
             text=llm_response,
-            entities=anon_items_for_decrypt,
+            entities=anon.items,
             operators={
                 "DEFAULT": OperatorConfig("decrypt", {"key": ENCRYPT_KEY})
             },
         )
         return deanon.text
     except Exception as e:
-        # The LLM may have paraphrased and dropped the encrypted tokens —
-        # in that case return the raw response rather than crashing.
-        print(f"[presidio] Deanonymization skipped (LLM did not echo tokens): {e}")
-        return llm_response
+        print(f"[presidio] Deanonymization failed, using fallback: {e}")
+        return _manual_deanonymize(llm_response, anon.items, ENCRYPT_KEY)
 
 
 # ---------------------------------------------------------------------------
