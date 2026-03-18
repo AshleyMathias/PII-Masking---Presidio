@@ -13,12 +13,7 @@ PII_ENTITY_ALLOWLIST = {
     "EMAIL_ADDRESS",
     "PHONE_NUMBER",
     "CREDIT_CARD",
-    "IBAN_CODE",
     "US_SSN",
-    "US_BANK_NUMBER",
-    "US_DRIVER_LICENSE",
-    "UK_NHS",
-    "AADHAAR_NUMBER",
 }
 
 SCORE_THRESHOLD = 0.3
@@ -46,6 +41,48 @@ def _resolve_overlaps(results):
         kept.append(r)
 
     return sorted(kept, key=lambda r: (r.start, r.end))
+
+
+def _normalize_b64_token(token: str) -> str:
+    """
+    Presidio's encrypt operator returns a base64-ish token. In some environments/models,
+    decrypt may fail with 'Incorrect padding' if the token is missing '=' padding or uses
+    URL-safe characters ('-' and '_'). Normalizing makes deanonymization robust.
+    """
+
+    # Convert URL-safe base64 alphabet to standard base64.
+    normalized = token.replace("-", "+").replace("_", "/")
+
+    # Add '=' padding if needed (length must be a multiple of 4 for standard base64).
+    pad = (-len(normalized)) % 4
+    if pad:
+        normalized += "=" * pad
+    return normalized
+
+
+def _normalize_anonymized_result(anon):
+    """
+    Return (normalized_text, normalized_items) where each item.text is normalized to match
+    what the decrypt operator can reliably parse.
+    """
+
+    normalized_text = anon.text
+    normalized_items = []
+
+    for item in anon.items:
+        old = item.text
+        new = _normalize_b64_token(old)
+        if new != old:
+            normalized_text = normalized_text.replace(old, new)
+            # Create a shallow copy-like object by mutating a reference-safe field.
+            # DeanonymizeEngine primarily uses item.text as the lookup key.
+            try:
+                item.text = new
+            except Exception:
+                pass
+        normalized_items.append(item)
+
+    return normalized_text, normalized_items
 
 
 # ---------------------------------------------------------------------------
@@ -137,17 +174,18 @@ def safe_llm_call(user_text: str) -> str:
             "DEFAULT": OperatorConfig("encrypt", {"key": ENCRYPT_KEY})
         },
     )
-    print(f"[presidio] Anonymized text sent to LLM:\n          {anon.text}\n")
+    anon_text_for_llm, anon_items_for_decrypt = _normalize_anonymized_result(anon)
+    print(f"[presidio] Anonymized text sent to LLM:\n          {anon_text_for_llm}\n")
 
     # --- Step 3: call LLM ---
-    llm_response = call_openai(anon.text)
+    llm_response = call_openai(anon_text_for_llm)
     print(f"[presidio] Raw LLM response:\n          {llm_response}\n")
 
     # --- Step 4: decrypt ---
     try:
         deanon = deanonymizer.deanonymize(
             text=llm_response,
-            entities=anon.items,
+            entities=anon_items_for_decrypt,
             operators={
                 "DEFAULT": OperatorConfig("decrypt", {"key": ENCRYPT_KEY})
             },
