@@ -1,0 +1,12 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+.PresidioPII/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.vscode/
+.idea/
+*.log
