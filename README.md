@@ -24,9 +24,9 @@ Presidio is an open-source framework for **PII detection and anonymization**.
 
 ```mermaid
 flowchart LR
-  A[Raw text] --> B[Presidio Analyzer\n(analyze)]
-  B --> C[RecognizerResults\n(entity_type, start/end, score)]
-  C --> D[Presidio Anonymizer\n(anonymize)]
+  A[Raw text] --> B[Presidio Analyzer<br/>(analyze)]
+  B --> C[RecognizerResults<br/>(entity_type, start/end, score)]
+  C --> D[Presidio Anonymizer<br/>(anonymize)]
   D --> E[Anonymized text]
 ```
 
